@@ -1,0 +1,87 @@
+package com.mmedojevic
+
+import akka.actor.typed.Behavior
+import akka.actor.typed.javadsl.AbstractBehavior
+import akka.actor.typed.javadsl.ActorContext
+import akka.actor.typed.javadsl.Behaviors
+import akka.actor.typed.javadsl.Receive
+
+import java.util.UUID
+
+interface ChatRoomCommand
+data class Initialize(val id: String) : ChatRoomCommand
+data class Send(val id: String, val msg: String, val userInfo: UserInfo?) : ChatRoomCommand
+object Terminate : ChatRoomCommand
+object Get : ChatRoomCommand
+
+class ChatRoomActor(context: ActorContext<ChatRoomCommand>, private val webSocket: WebSocket) : AbstractBehavior<ChatRoomCommand>(context) {
+    private lateinit var id: String
+    private var messages: List<String> = listOf()
+    private val messageRepository = MessageRepository()
+
+    override fun createReceive(): Receive<ChatRoomCommand> = newReceiveBuilder()
+        .onMessage(Initialize::class.java) { msg ->
+            this.id = msg.id
+            System.out.println("ChatRoom ${context.self.path()} initialized (id: ${this.id})")
+            webSocket.sendMessageToWebSocket(this.id, "Chat room ${this.id} initialized")
+            this
+        }
+        .onMessage(Send::class.java) { msg ->
+            System.out.println("ChatRoom ${msg.id} received message (${msg.msg})")
+            val senderInfo = msg.userInfo
+            val senderDisplay = if (senderInfo != null) "${senderInfo.name} (${senderInfo.sub})" else "Anonymous"
+            println("Message from user: $senderDisplay")
+            
+            messages = messages + msg.msg
+            
+            // Save message to PostgreSQL using Akka Streams
+            val chatIdUuid = UUID.fromString(msg.id)
+            val senderId = if (senderInfo != null) UUID.fromString(senderInfo.sub) else UUID.randomUUID()
+            
+            messageRepository.createMessageSource(chatIdUuid, senderId, msg.msg)
+                .runWith(akka.stream.javadsl.Sink.ignore(), context.system)
+                .whenComplete { _, ex ->
+                    if (ex != null) {
+                        System.err.println("Failed to save message to database: ${ex.message}")
+                    } else {
+                        System.out.println("Message saved to database successfully for user: $senderDisplay")
+                    }
+                }
+            
+            // Send the message back to all connected WebSocket clients with sender name
+            val displayMessage = if (senderInfo != null) "${senderInfo.name}: ${msg.msg}" else "Anonymous: ${msg.msg}"
+            webSocket.sendMessageToWebSocket(msg.id, "Message: $displayMessage")
+            this
+        }
+        .onMessage(Terminate::class.java) { msg ->
+            System.out.println("ChatRoom ${context.self.path()} terminating")
+            webSocket.sendMessageToWebSocket(this.id, "Chat room ${this.id} terminated")
+            messageRepository.close()
+            Behaviors.stopped()
+        }
+        .onMessage(Get::class.java) { msg ->
+            System.out.println("ChatRoom ${context.self.path()} getting messages")
+            
+            // Get messages from database
+            val chatIdUuid = UUID.fromString(this.id)
+            messageRepository.getMessages(chatIdUuid)
+                .whenComplete { dbMessages, ex ->
+                    if (ex != null) {
+                        System.err.println("Failed to get messages from database: ${ex.message}")
+                        val allMessages = messages.joinToString(";")
+                        webSocket.sendMessageToWebSocket(this.id, "Messages: $allMessages")
+                    } else {
+                        val dbMessageTexts = dbMessages.map { "${it.senderId}: ${it.message}" }.joinToString(";")
+                        webSocket.sendMessageToWebSocket(this.id, "Messages: $dbMessageTexts")
+                    }
+                }
+            this
+        }
+        .build()
+
+    companion object {
+        fun create(webSocket: WebSocket): Behavior<ChatRoomCommand> = Behaviors.setup { context ->
+            ChatRoomActor(context, webSocket)
+        }
+    }
+}
