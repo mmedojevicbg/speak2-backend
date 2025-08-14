@@ -12,11 +12,10 @@ interface ChatRoomCommand
 data class Initialize(val id: String) : ChatRoomCommand
 data class Send(val id: String, val msg: String, val userInfo: UserInfo?) : ChatRoomCommand
 object Terminate : ChatRoomCommand
-object Get : ChatRoomCommand
+data class Get(val userInfo: UserInfo?, val sessionId: String) : ChatRoomCommand
 
 class ChatRoomActor(context: ActorContext<ChatRoomCommand>, private val webSocket: WebSocket) : AbstractBehavior<ChatRoomCommand>(context) {
     private lateinit var id: String
-    private var messages: List<String> = listOf()
     private val messageRepository = MessageRepository()
 
     override fun createReceive(): Receive<ChatRoomCommand> = newReceiveBuilder()
@@ -31,9 +30,7 @@ class ChatRoomActor(context: ActorContext<ChatRoomCommand>, private val webSocke
             val senderInfo = msg.userInfo
             val senderDisplay = if (senderInfo != null) "${senderInfo.name} (${senderInfo.sub})" else "Anonymous"
             println("Message from user: $senderDisplay")
-            
-            messages = messages + msg.msg
-            
+
             // Save message to PostgreSQL using Akka Streams
             val chatIdUuid = UUID.fromString(msg.id)
             val senderId = if (senderInfo != null) UUID.fromString(senderInfo.sub) else UUID.randomUUID()
@@ -66,13 +63,13 @@ class ChatRoomActor(context: ActorContext<ChatRoomCommand>, private val webSocke
             val chatIdUuid = UUID.fromString(this.id)
             messageRepository.getMessages(chatIdUuid)
                 .whenComplete { dbMessages, ex ->
-                    if (ex != null) {
-                        System.err.println("Failed to get messages from database: ${ex.message}")
-                        val allMessages = messages.joinToString(";")
-                        webSocket.sendMessageToWebSocket(this.id, "Messages: $allMessages")
+                    if (ex == null) {
+                        dbMessages.forEach {
+                            webSocket.sendMessageToSession(this.id, msg.sessionId, "${it.senderId}: ${it.message}")
+                        }
                     } else {
-                        val dbMessageTexts = dbMessages.map { "${it.senderId}: ${it.message}" }.joinToString(";")
-                        webSocket.sendMessageToWebSocket(this.id, "Messages: $dbMessageTexts")
+                        System.err.println("Failed to get messages from database: ${ex.message}")
+
                     }
                 }
             this

@@ -11,7 +11,7 @@ interface SupervisorCommand
 data class CreateChatRoomCommand(val id: String, val webSocket: WebSocket, val userInfo: UserInfo?) : SupervisorCommand
 data class SendMessageCommand(val id: String, val msg: String, val userInfo: UserInfo?) : SupervisorCommand
 data class DeleteChatRoomCommand(val id: String) : SupervisorCommand
-data class GetMessagesCommand(val id: String) : SupervisorCommand
+data class GetMessagesCommand(val id: String, val userInfo: UserInfo?, val sessionId: String) : SupervisorCommand
 object Start : SupervisorCommand
 
 class ChatSupervisorActor(context: ActorContext<SupervisorCommand>) : AbstractBehavior<SupervisorCommand>(context) {
@@ -50,7 +50,7 @@ class ChatSupervisorActor(context: ActorContext<SupervisorCommand>) : AbstractBe
         }
         .onMessage(GetMessagesCommand::class.java) { msg ->
             val child = context.getChild("chat-room-${msg.id}").get() as ActorRef<ChatRoomCommand>
-            child.tell(Get)
+            child.tell(Get(msg.userInfo, msg.sessionId))
             this
         }
         .build()

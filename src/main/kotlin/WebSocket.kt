@@ -52,7 +52,7 @@ class WebSocket : AllDirectives() {
                         actorRef.tell(SendMessageCommand(id, payload, userInfo))
                     }
                     "get" -> {
-                        actorRef.tell(GetMessagesCommand(id))
+                        actorRef.tell(GetMessagesCommand(id, userInfo, sessionId))
                     }
                     "delete" -> {
                         actorRef.tell(DeleteChatRoomCommand(id))
@@ -83,6 +83,12 @@ class WebSocket : AllDirectives() {
         } else {
             logger.warn("No active sessions found for room $id")
         }
+    }
+
+
+    fun sendMessageToSession(id: String, sessionId: String, message: String) {
+        val sessions = webSocketQueues[id]
+        sessions?.find { it.first == sessionId }?.second?.offer(TextMessage.create(message))
     }
     
     private fun removeSession(roomId: String, sessionId: String) {
