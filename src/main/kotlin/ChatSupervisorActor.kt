@@ -1,12 +1,24 @@
 package com.mmedojevic
 
-import akka.actor.typed.ActorRef
 import akka.actor.typed.Behavior
 import akka.actor.typed.javadsl.AbstractBehavior
 import akka.actor.typed.javadsl.ActorContext
 import akka.actor.typed.javadsl.Behaviors
 import akka.actor.typed.javadsl.Receive
+import akka.cluster.sharding.typed.javadsl.ClusterSharding
+import akka.cluster.sharding.typed.javadsl.Entity
+import akka.cluster.sharding.typed.javadsl.EntityTypeKey
+import com.fasterxml.jackson.annotation.JsonTypeInfo
+import com.fasterxml.jackson.annotation.JsonSubTypes
 
+@JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "type")
+@JsonSubTypes(
+    JsonSubTypes.Type(value = CreateChatRoomCommand::class, name = "create"),
+    JsonSubTypes.Type(value = SendMessageCommand::class, name = "send"),
+    JsonSubTypes.Type(value = DeleteChatRoomCommand::class, name = "delete"),
+    JsonSubTypes.Type(value = GetMessagesCommand::class, name = "get"),
+    JsonSubTypes.Type(value = Start::class, name = "start")
+)
 interface SupervisorCommand
 data class CreateChatRoomCommand(val id: String, val webSocket: WebSocket, val userInfo: UserInfo?) : SupervisorCommand
 data class SendMessageCommand(val id: String, val msg: String, val userInfo: UserInfo?) : SupervisorCommand
@@ -16,48 +28,47 @@ object Start : SupervisorCommand
 
 class ChatSupervisorActor(context: ActorContext<SupervisorCommand>) : AbstractBehavior<SupervisorCommand>(context) {
     private val webSocketInstances = mutableMapOf<String, WebSocket>()
-
-    override fun createReceive(): Receive<SupervisorCommand> = newReceiveBuilder()
-        .onMessage(CreateChatRoomCommand::class.java) { msg ->
-            val actorName = "chat-room-${msg.id}"
-            val existingChild = context.getChild(actorName)
-            
-            val child = if (existingChild.isPresent) {
-                println("Chat room ${msg.id} already exists, using existing actor")
-                existingChild.get() as ActorRef<ChatRoomCommand>
-            } else {
-                println("Creating new chat room actor for ${msg.id}")
-                val newChild = context.spawn(ChatRoomActor.create(msg.webSocket), actorName)
-                newChild.tell(Initialize(msg.id))
-                webSocketInstances[msg.id] = msg.webSocket
-                newChild
-            }
-            
-            this
-        }
-        .onMessage(SendMessageCommand::class.java) { msg ->
-            val child = context.getChild("chat-room-${msg.id}").get() as ActorRef<ChatRoomCommand>
-            child.tell(Send(msg.id, msg.msg, msg.userInfo))
-            this
-        }
-        .onMessage(DeleteChatRoomCommand::class.java) { msg ->
-            val actorName = "chat-room-${msg.id}"
-            context.getChild(actorName).ifPresent { actor ->
-                (actor as ActorRef<ChatRoomCommand>).tell(Terminate)
-            }
-            webSocketInstances.remove(msg.id)
-            this
-        }
-        .onMessage(GetMessagesCommand::class.java) { msg ->
-            val child = context.getChild("chat-room-${msg.id}").get() as ActorRef<ChatRoomCommand>
-            child.tell(Get(msg.userInfo, msg.sessionId))
-            this
-        }
-        .build()
+    private val sharding = ClusterSharding.get(context.system)
 
     companion object {
+        val CHAT_ROOM_TYPE_KEY: EntityTypeKey<ChatRoomCommand> = EntityTypeKey.create(ChatRoomCommand::class.java, "ChatRoom")
+        
         fun create(): Behavior<SupervisorCommand> = Behaviors.setup { context ->
             ChatSupervisorActor(context)
         }
     }
+
+    init {
+        sharding.init(
+            Entity.of(CHAT_ROOM_TYPE_KEY) { entityContext ->
+                ChatRoomActor.create()
+            }
+        )
+    }
+
+    override fun createReceive(): Receive<SupervisorCommand> = newReceiveBuilder()
+        .onMessage(CreateChatRoomCommand::class.java) { msg ->
+            println("Creating new chat room entity for ${msg.id}")
+            val entityRef = sharding.entityRefFor(CHAT_ROOM_TYPE_KEY, msg.id)
+            entityRef.tell(Initialize(msg.id, msg.webSocket))
+            webSocketInstances[msg.id] = msg.webSocket
+            this
+        }
+        .onMessage(SendMessageCommand::class.java) { msg ->
+            val entityRef = sharding.entityRefFor(CHAT_ROOM_TYPE_KEY, msg.id)
+            entityRef.tell(Send(msg.id, msg.msg, msg.userInfo))
+            this
+        }
+        .onMessage(DeleteChatRoomCommand::class.java) { msg ->
+            val entityRef = sharding.entityRefFor(CHAT_ROOM_TYPE_KEY, msg.id)
+            entityRef.tell(Terminate)
+            webSocketInstances.remove(msg.id)
+            this
+        }
+        .onMessage(GetMessagesCommand::class.java) { msg ->
+            val entityRef = sharding.entityRefFor(CHAT_ROOM_TYPE_KEY, msg.id)
+            entityRef.tell(Get(msg.userInfo, msg.sessionId))
+            this
+        }
+        .build()
 }

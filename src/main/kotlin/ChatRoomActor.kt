@@ -5,22 +5,33 @@ import akka.actor.typed.javadsl.AbstractBehavior
 import akka.actor.typed.javadsl.ActorContext
 import akka.actor.typed.javadsl.Behaviors
 import akka.actor.typed.javadsl.Receive
+import com.fasterxml.jackson.annotation.JsonTypeInfo
+import com.fasterxml.jackson.annotation.JsonSubTypes
 
 import java.util.UUID
 
+@JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "type")
+@JsonSubTypes(
+    JsonSubTypes.Type(value = Initialize::class, name = "initialize"),
+    JsonSubTypes.Type(value = Send::class, name = "send"),
+    JsonSubTypes.Type(value = Terminate::class, name = "terminate"),
+    JsonSubTypes.Type(value = Get::class, name = "get")
+)
 interface ChatRoomCommand
-data class Initialize(val id: String) : ChatRoomCommand
+data class Initialize(val id: String, val webSocket: WebSocket) : ChatRoomCommand
 data class Send(val id: String, val msg: String, val userInfo: UserInfo?) : ChatRoomCommand
 object Terminate : ChatRoomCommand
 data class Get(val userInfo: UserInfo?, val sessionId: String) : ChatRoomCommand
 
-class ChatRoomActor(context: ActorContext<ChatRoomCommand>, private val webSocket: WebSocket) : AbstractBehavior<ChatRoomCommand>(context) {
+class ChatRoomActor(context: ActorContext<ChatRoomCommand>) : AbstractBehavior<ChatRoomCommand>(context) {
     private lateinit var id: String
+    private lateinit var webSocket: WebSocket
     private val messageRepository = MessageRepository()
 
     override fun createReceive(): Receive<ChatRoomCommand> = newReceiveBuilder()
         .onMessage(Initialize::class.java) { msg ->
             this.id = msg.id
+            this.webSocket = msg.webSocket
             System.out.println("ChatRoom ${context.self.path()} initialized (id: ${this.id})")
             webSocket.sendMessageToWebSocket(this.id, "Chat room ${this.id} initialized")
             this
@@ -77,8 +88,8 @@ class ChatRoomActor(context: ActorContext<ChatRoomCommand>, private val webSocke
         .build()
 
     companion object {
-        fun create(webSocket: WebSocket): Behavior<ChatRoomCommand> = Behaviors.setup { context ->
-            ChatRoomActor(context, webSocket)
+        fun create(): Behavior<ChatRoomCommand> = Behaviors.setup { context ->
+            ChatRoomActor(context)
         }
     }
 }
