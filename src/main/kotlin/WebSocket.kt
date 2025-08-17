@@ -2,6 +2,8 @@ package com.mmedojevic
 
 import akka.NotUsed
 import akka.actor.typed.ActorSystem
+import akka.cluster.sharding.typed.javadsl.ClusterSharding
+import akka.cluster.sharding.typed.javadsl.EntityTypeKey
 import akka.http.javadsl.model.ws.Message
 import akka.http.javadsl.model.ws.TextMessage
 import akka.http.javadsl.server.AllDirectives
@@ -22,9 +24,9 @@ class WebSocket : AllDirectives() {
     // Map of chat room ID to list of WebSocket sessions
     private val webSocketQueues = ConcurrentHashMap<String, MutableList<Pair<String, SourceQueueWithComplete<Message>>>>()
     
-    private fun createWebSocketFlow(actorRef: ActorSystem<SupervisorCommand>, id: String, userInfo: UserInfo?): Flow<Message, Message, NotUsed>? {
+    private fun createWebSocketFlow(system: ActorSystem<Void>, sharding: ClusterSharding, chatRoomTypeKey: EntityTypeKey<ChatRoomCommand>, id: String, userInfo: UserInfo?): Flow<Message, Message, NotUsed>? {
         val sourceQueue = Source.queue<Message>(100, OverflowStrategy.dropHead())
-        val materialized = sourceQueue.preMaterialize(actorRef)
+        val materialized = sourceQueue.preMaterialize(system)
         val queue = materialized.first()
         val source = materialized.second()
         
@@ -44,18 +46,19 @@ class WebSocket : AllDirectives() {
             .to(Sink.foreach { text ->
                 val commandString = text.asTextMessage().strictText
                 val (command, payload) = commandString.split("|", limit = 2)
+                val entityRef = sharding.entityRefFor(chatRoomTypeKey, id)
                 when (command) {
                     "init" -> {
-                        actorRef.tell(CreateChatRoomCommand(id, this, userInfo))
+                        entityRef.tell(Initialize(id, this@WebSocket))
                     }
                     "send" -> {
-                        actorRef.tell(SendMessageCommand(id, payload, userInfo))
+                        entityRef.tell(Send(id, payload, userInfo))
                     }
                     "get" -> {
-                        actorRef.tell(GetMessagesCommand(id, userInfo, sessionId))
+                        entityRef.tell(Get(userInfo, sessionId))
                     }
                     "delete" -> {
-                        actorRef.tell(DeleteChatRoomCommand(id))
+                        entityRef.tell(Terminate)
                         // Close all sessions for this room
                         webSocketQueues[id]?.forEach { (_, queue) -> queue.complete() }
                         webSocketQueues.remove(id)
@@ -103,7 +106,7 @@ class WebSocket : AllDirectives() {
         }
     }
 
-    fun websocketRoute(system: ActorSystem<SupervisorCommand>): Route = pathPrefix("chat-room") {
+    fun websocketRoute(system: ActorSystem<Void>, sharding: ClusterSharding, chatRoomTypeKey: EntityTypeKey<ChatRoomCommand>): Route = pathPrefix("chat-room") {
         path(segment()) { dynamicSegment ->
             extractRequest { request ->
                 extractUpgradeToWebSocket { upgrade ->
@@ -126,7 +129,7 @@ class WebSocket : AllDirectives() {
                     }
                     
                     // Create WebSocket response with subprotocol echoed back
-                    val flow = createWebSocketFlow(system, dynamicSegment, userInfo)
+                    val flow = createWebSocketFlow(system, sharding, chatRoomTypeKey, dynamicSegment, userInfo)
                     val response = if (jwt != null) {
                         upgrade.handleMessagesWith(flow, jwt)  // Echo back the JWT as subprotocol
                     } else {
