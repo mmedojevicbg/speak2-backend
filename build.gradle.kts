@@ -28,9 +28,8 @@ dependencies {
     implementation("ch.qos.logback:logback-classic:1.4.14")
     implementation("com.fasterxml.jackson.core:jackson-databind:2.18.2")
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.18.2")
-    implementation("org.postgresql:postgresql:42.7.4")
-    implementation("com.typesafe.slick:slick_2.13:3.5.2")
-    implementation("com.typesafe.slick:slick-hikaricp_2.13:3.5.2")
+    implementation("com.datastax.oss:java-driver-core:4.17.0")
+    implementation("com.datastax.oss:java-driver-query-builder:4.17.0")
 }
 
 tasks.test {

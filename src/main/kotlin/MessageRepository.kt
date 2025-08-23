@@ -2,37 +2,44 @@ package com.mmedojevic
 
 import akka.NotUsed
 import akka.stream.javadsl.Source
-import java.sql.Connection
-import java.sql.DriverManager
-import java.sql.PreparedStatement
+import com.datastax.oss.driver.api.core.CqlSession
+import com.datastax.oss.driver.api.core.cql.PreparedStatement
+import com.datastax.oss.driver.api.core.cql.Row
+import com.datastax.oss.driver.api.querybuilder.QueryBuilder.*
+import java.net.InetSocketAddress
+import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
 
 class MessageRepository {
     private val executor = Executors.newFixedThreadPool(10)
-    private val dbUrl = "jdbc:postgresql://localhost:5432/speak2"
-    private val dbUser = "admin"
-    private val dbPassword = "secret"
+    private val session: CqlSession = CqlSession.builder()
+        .addContactPoint(InetSocketAddress("127.0.0.1", 9042))
+        .withLocalDatacenter("datacenter1")
+        .withKeyspace("speak2")
+        .withAuthCredentials("cassandra", "cassandra")
+        .build()
+    
+    private val insertStatement: PreparedStatement = session.prepare(
+        "INSERT INTO chat_messages (id, chat_id, sender_id, message, sent_at) VALUES (?, ?, ?, ?, ?)"
+    )
+    
+    private val selectStatement: PreparedStatement = session.prepare(
+        "SELECT id, chat_id, sender_id, message, sent_at FROM chat_messages WHERE chat_id = ? ORDER BY sent_at"
+    )
     
     fun saveMessage(chatId: UUID, senderId: UUID, messageText: String): CompletableFuture<ChatMessage> {
         return CompletableFuture.supplyAsync({
             val message = ChatMessage(chatId = chatId, senderId = senderId, message = messageText)
             
-            val connection = DriverManager.getConnection(dbUrl, dbUser, dbPassword)
-            val sql = "INSERT INTO chat_messages (id, chat_id, sender_id, message, sent_at) VALUES (?, ?, ?, ?, ?)"
-            val statement = connection.prepareStatement(sql)
-            
-            statement.setObject(1, message.id)
-            statement.setObject(2, message.chatId)
-            statement.setObject(3, message.senderId)
-            statement.setString(4, message.message)
-            statement.setTimestamp(5, message.sentAt)
-            
-            statement.executeUpdate()
-            
-            statement.close()
-            connection.close()
+            session.execute(insertStatement.bind(
+                message.id,
+                message.chatId,
+                message.senderId,
+                message.message,
+                message.sentAt.toInstant()
+            ))
             
             message
         }, executor)
@@ -40,28 +47,19 @@ class MessageRepository {
     
     fun getMessages(chatId: UUID): CompletableFuture<List<ChatMessage>> {
         return CompletableFuture.supplyAsync({
-            val connection = DriverManager.getConnection(dbUrl, dbUser, dbPassword)
-            val sql = "SELECT id, chat_id, sender_id, message, sent_at FROM chat_messages WHERE chat_id = ? ORDER BY sent_at"
-            val statement = connection.prepareStatement(sql)
-            
-            statement.setObject(1, chatId)
-            val resultSet = statement.executeQuery()
+            val resultSet = session.execute(selectStatement.bind(chatId))
             
             val messages = mutableListOf<ChatMessage>()
-            while (resultSet.next()) {
+            for (row in resultSet) {
                 val message = ChatMessage(
-                    id = resultSet.getObject("id") as UUID,
-                    chatId = resultSet.getObject("chat_id") as UUID,
-                    senderId = resultSet.getObject("sender_id") as UUID,
-                    message = resultSet.getString("message"),
-                    sentAt = resultSet.getTimestamp("sent_at")
+                    id = row.getUuid("id")!!,
+                    chatId = row.getUuid("chat_id")!!,
+                    senderId = row.getUuid("sender_id")!!,
+                    message = row.getString("message")!!,
+                    sentAt = java.sql.Timestamp.from(row.getInstant("sent_at"))
                 )
                 messages.add(message)
             }
-            
-            resultSet.close()
-            statement.close()
-            connection.close()
             
             messages.toList()
         }, executor)
@@ -72,6 +70,7 @@ class MessageRepository {
     }
     
     fun close() {
+        session.close()
         executor.shutdown()
     }
 }
