@@ -7,7 +7,6 @@ import akka.actor.typed.javadsl.Behaviors
 import akka.actor.typed.javadsl.Receive
 import com.fasterxml.jackson.annotation.JsonTypeInfo
 import com.fasterxml.jackson.annotation.JsonSubTypes
-
 import java.util.UUID
 
 @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "type")
@@ -22,13 +21,16 @@ data class Initialize(val id: String, val webSocket: WebSocket) : ChatRoomComman
 data class Send(val id: String, val msg: String, val userInfo: UserInfo?) : ChatRoomCommand
 object Terminate : ChatRoomCommand
 data class Get(val userInfo: UserInfo?, val sessionId: String) : ChatRoomCommand
+data class GrammarCheckResponse(val correctedText: String) : ChatRoomCommand
 
 class ChatRoomActor(context: ActorContext<ChatRoomCommand>) : AbstractBehavior<ChatRoomCommand>(context) {
     private lateinit var id: String
     private lateinit var webSocket: WebSocket
     private val messageRepository = MessageRepository()
+    private val grammarCheckActor = context.spawn(GrammarCheckActor.create(), "grammarCheck")
 
     override fun createReceive(): Receive<ChatRoomCommand> = newReceiveBuilder()
+
         .onMessage(Initialize::class.java) { msg ->
             this.id = msg.id
             this.webSocket = msg.webSocket
@@ -42,10 +44,13 @@ class ChatRoomActor(context: ActorContext<ChatRoomCommand>) : AbstractBehavior<C
             val senderDisplay = if (senderInfo != null) "${senderInfo.name} (${senderInfo.sub})" else "Anonymous"
             println("Message from user: $senderDisplay")
 
-            // Save message to PostgreSQL using Akka Streams
+            val displayMessage = if (senderInfo != null) "${senderInfo.name}: ${msg.msg}" else "Anonymous: ${msg.msg}"
+            webSocket.sendMessageToWebSocket(msg.id, "Message: $displayMessage")
+
+            // Save corrected message to database using Akka Streams
             val chatIdUuid = UUID.fromString(msg.id)
             val senderId = if (senderInfo != null) UUID.fromString(senderInfo.sub) else UUID.randomUUID()
-            
+
             messageRepository.createMessageSource(chatIdUuid, senderId, msg.msg)
                 .runWith(akka.stream.javadsl.Sink.ignore(), context.system)
                 .whenComplete { _, ex ->
@@ -55,10 +60,9 @@ class ChatRoomActor(context: ActorContext<ChatRoomCommand>) : AbstractBehavior<C
                         System.out.println("Message saved to database successfully for user: $senderDisplay")
                     }
                 }
-            
-            // Send the message back to all connected WebSocket clients with sender name
-            val displayMessage = if (senderInfo != null) "${senderInfo.name}: ${msg.msg}" else "Anonymous: ${msg.msg}"
-            webSocket.sendMessageToWebSocket(msg.id, "Message: $displayMessage")
+
+            // Send message to grammar check first
+            grammarCheckActor.tell(GrammarCheckRequest(msg.msg, context.self))
             this
         }
         .onMessage(Terminate::class.java) { msg ->
@@ -83,6 +87,12 @@ class ChatRoomActor(context: ActorContext<ChatRoomCommand>) : AbstractBehavior<C
 
                     }
                 }
+            this
+        }
+        .onMessage(GrammarCheckResponse::class.java) {
+            val correctedMessage = it.correctedText
+            val displayMessage = "Grammar corrections: $correctedMessage"
+            webSocket.sendMessageToWebSocket(id, displayMessage)
             this
         }
         .build()
